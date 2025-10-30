@@ -105,6 +105,9 @@ app.set('trust proxy', 1);
 const limiter = rateLimit({ windowMs: 60_000, max: 120 });
 app.use(limiter);
 
+// Stricter limiter for public waitlist endpoint
+const waitlistLimiter = rateLimit({ windowMs: 60_000, max: 10 });
+
 /**
  * @swagger
  * /health:
@@ -131,6 +134,75 @@ app.get('/health', (_req, res) => {
 
 // Swagger UI (protect in prod if desired)
 app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+
+// ===== PUBLIC WAITLIST ENDPOINT =====
+/**
+ * @swagger
+ * /waitlist:
+ *   post:
+ *     summary: Join waitlist
+ *     tags: [System]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email, phoneNumber, language]
+ *             properties:
+ *               email:
+ *                 type: string
+ *                 format: email
+ *               phoneNumber:
+ *                 type: string
+ *               language:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Added to waitlist
+ *       400:
+ *         description: Validation error
+ */
+app.post('/waitlist', waitlistLimiter, async (req, res) => {
+  try {
+    const rawEmail = String((req.body?.email || '')).trim().toLowerCase();
+    const rawPhone = String((req.body?.phoneNumber || '')).trim();
+    const language = String((req.body?.language || '')).trim();
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!rawEmail || !emailRegex.test(rawEmail)) {
+      return res.status(400).json({ error: 'Valid email is required' });
+    }
+    if (!rawPhone) {
+      return res.status(400).json({ error: 'Phone number is required' });
+    }
+    if (!language) {
+      return res.status(400).json({ error: 'Language is required' });
+    }
+
+    // Basic E.164 normalization attempt (keep + and digits)
+    const phoneNumber = rawPhone.replace(/[^+\d]/g, '');
+
+    const { error } = await supabaseAdmin
+      .from('waitlist')
+      .insert({ email: rawEmail, phone_number: phoneNumber, language });
+
+    if (error) {
+      // Unique violation => already on waitlist is OK UX-wise
+      const already = error.message?.toLowerCase().includes('duplicate');
+      if (already) {
+        return res.json({ message: 'Already on waitlist' });
+      }
+      logger.error({ err: error }, 'Error inserting waitlist');
+      return res.status(500).json({ error: 'Failed to add to waitlist' });
+    }
+
+    res.json({ message: 'Added to waitlist' });
+  } catch (error) {
+    logger.error({ err: error }, 'Unexpected error in /waitlist');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 // Admin guard middleware
 function adminGuard(req: express.Request, res: express.Response, next: express.NextFunction) {
@@ -1288,6 +1360,106 @@ app.get('/admin/stats/growth', adminGuard, async (req, res) => {
 });
 
 // ===== AUDIT ENDPOINTS =====
+
+/**
+ * @swagger
+ * /admin/waitlist:
+ *   get:
+ *     summary: List waitlist entries
+ *     tags: [System]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 20 }
+ *       - in: query
+ *         name: language
+ *         schema: { type: string }
+ *       - in: query
+ *         name: search
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Paginated waitlist entries
+ */
+app.get('/admin/waitlist', adminGuard, async (req, res) => {
+  try {
+    const { page = 1, limit = 20, language, search } = req.query as any;
+    const offset = (Number(page) - 1) * Number(limit);
+
+    let query = supabaseAdmin
+      .from('waitlist')
+      .select('id, email, phone_number, language, created_at', { count: 'exact' })
+      .order('created_at', { ascending: false });
+
+    if (language) query = query.eq('language', language);
+    if (search) query = query.or(`email.ilike.%${search}%,phone_number.ilike.%${search}%`);
+
+    const { data, error, count } = await query.range(offset, offset + Number(limit) - 1);
+    if (error) {
+      logger.error({ err: error }, 'Error fetching waitlist');
+      return res.status(500).json({ error: 'Failed to fetch waitlist' });
+    }
+
+    res.json({
+      entries: data || [],
+      pagination: {
+        page: Number(page),
+        limit: Number(limit),
+        total: count || 0,
+        pages: Math.ceil((count || 0) / Number(limit))
+      }
+    });
+  } catch (error) {
+    logger.error({ err: error }, 'Unexpected error in /admin/waitlist');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * @swagger
+ * /admin/waitlist/export:
+ *   get:
+ *     summary: Export waitlist as CSV
+ *     tags: [System]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: CSV export
+ *         content:
+ *           text/csv:
+ *             schema:
+ *               type: string
+ */
+app.get('/admin/waitlist/export', adminGuard, async (_req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('waitlist')
+      .select('email, phone_number, language, created_at')
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      logger.error({ err: error }, 'Error exporting waitlist');
+      return res.status(500).json({ error: 'Failed to export waitlist' });
+    }
+
+    const header = 'email,phone_number,language,created_at\n';
+    const rows = (data || []).map(r => [r.email, r.phone_number, r.language, r.created_at].join(','));
+    const csv = header + rows.join('\n');
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="waitlist.csv"');
+    res.send(csv);
+  } catch (error) {
+    logger.error({ err: error }, 'Unexpected error in /admin/waitlist/export');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 /**
  * @swagger
