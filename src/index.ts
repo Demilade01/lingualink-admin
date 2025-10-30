@@ -273,7 +273,34 @@ app.get('/admin/users', adminGuard, async (req, res) => {
   }
 });
 
-// Get specific user details
+/**
+ * @swagger
+ * /admin/users/{id}:
+ *   get:
+ *     summary: Get user by ID
+ *     tags: [Users]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *     responses:
+ *       200:
+ *         description: User details
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 user:
+ *                   $ref: '#/components/schemas/User'
+ *       404:
+ *         description: User not found
+ */
 app.get('/admin/users/:id', adminGuard, async (req, res) => {
   try {
     const { id } = req.params;
@@ -407,7 +434,29 @@ app.post('/admin/users/:id/ban', adminGuard, async (req, res) => {
   }
 });
 
-// Unban user
+/**
+ * @swagger
+ * /admin/users/{id}/unban:
+ *   post:
+ *     summary: Unban a user
+ *     tags: [Users]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *     responses:
+ *       200:
+ *         description: User unbanned successfully
+ *       400:
+ *         description: User is not banned
+ *       404:
+ *         description: User not found
+ */
 app.post('/admin/users/:id/unban', adminGuard, async (req, res) => {
   try {
     const { id } = req.params;
@@ -461,7 +510,39 @@ app.post('/admin/users/:id/unban', adminGuard, async (req, res) => {
   }
 });
 
-// Promote user to admin
+/**
+ * @swagger
+ * /admin/users/{id}/promote:
+ *   post:
+ *     summary: Promote user to admin/superadmin
+ *     tags: [Users]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               role:
+ *                 type: string
+ *                 enum: [admin, superadmin]
+ *     responses:
+ *       200:
+ *         description: Promotion successful
+ *       400:
+ *         description: Invalid role or already has role
+ *       404:
+ *         description: User not found
+ */
 app.post('/admin/users/:id/promote', adminGuard, async (req, res) => {
   try {
     const { id } = req.params;
@@ -519,7 +600,39 @@ app.post('/admin/users/:id/promote', adminGuard, async (req, res) => {
   }
 });
 
-// Demote user from admin
+/**
+ * @swagger
+ * /admin/users/{id}/demote:
+ *   post:
+ *     summary: Demote user from admin/superadmin
+ *     tags: [Users]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               role:
+ *                 type: string
+ *                 enum: [admin]
+ *     responses:
+ *       200:
+ *         description: Demotion successful
+ *       400:
+ *         description: User does not have role
+ *       404:
+ *         description: User not found
+ */
 app.post('/admin/users/:id/demote', adminGuard, async (req, res) => {
   try {
     const { id } = req.params;
@@ -575,7 +688,39 @@ app.post('/admin/users/:id/demote', adminGuard, async (req, res) => {
 
 // ===== LANGUAGE ROLE MANAGEMENT ENDPOINTS =====
 
-// Grant validator role for specific language
+/**
+ * @swagger
+ * /admin/users/{id}/roles/validator:
+ *   post:
+ *     summary: Grant validator role for a language
+ *     tags: [Users]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [language]
+ *             properties:
+ *               language:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Validator granted
+ *       400:
+ *         description: Already has role or bad input
+ *       404:
+ *         description: User not found
+ */
 app.post('/admin/users/:id/roles/validator', adminGuard, async (req, res) => {
   try {
     const { id } = req.params;
@@ -636,7 +781,39 @@ app.post('/admin/users/:id/roles/validator', adminGuard, async (req, res) => {
   }
 });
 
-// Grant ambassador role for specific language
+/**
+ * @swagger
+ * /admin/users/{id}/roles/ambassador:
+ *   post:
+ *     summary: Grant ambassador role for a language
+ *     tags: [Users]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [language]
+ *             properties:
+ *               language:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Ambassador granted
+ *       400:
+ *         description: Already has role or bad input
+ *       404:
+ *         description: User not found
+ */
 app.post('/admin/users/:id/roles/ambassador', adminGuard, async (req, res) => {
   try {
     const { id } = req.params;
@@ -697,7 +874,39 @@ app.post('/admin/users/:id/roles/ambassador', adminGuard, async (req, res) => {
   }
 });
 
-// Revoke validator role
+/**
+ * @swagger
+ * /admin/users/{id}/roles/validator:
+ *   delete:
+ *     summary: Revoke validator role for a language
+ *     tags: [Users]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [language]
+ *             properties:
+ *               language:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Validator revoked
+ *       400:
+ *         description: User does not have role
+ *       404:
+ *         description: User not found
+ */
 app.delete('/admin/users/:id/roles/validator', adminGuard, async (req, res) => {
   try {
     const { id } = req.params;
@@ -758,7 +967,39 @@ app.delete('/admin/users/:id/roles/validator', adminGuard, async (req, res) => {
   }
 });
 
-// Revoke ambassador role
+/**
+ * @swagger
+ * /admin/users/{id}/roles/ambassador:
+ *   delete:
+ *     summary: Revoke ambassador role for a language
+ *     tags: [Users]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [language]
+ *             properties:
+ *               language:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Ambassador revoked
+ *       400:
+ *         description: User does not have role
+ *       404:
+ *         description: User not found
+ */
 app.delete('/admin/users/:id/roles/ambassador', adminGuard, async (req, res) => {
   try {
     const { id } = req.params;
@@ -891,7 +1132,18 @@ app.get('/admin/stats/overview', adminGuard, async (req, res) => {
   }
 });
 
-// Language rankings
+/**
+ * @swagger
+ * /admin/stats/languages:
+ *   get:
+ *     summary: Language rankings
+ *     tags: [Statistics]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Ranked list of languages with user counts
+ */
 app.get('/admin/stats/languages', adminGuard, async (req, res) => {
   try {
     const { data: users, error } = await supabaseAdmin
@@ -927,7 +1179,18 @@ app.get('/admin/stats/languages', adminGuard, async (req, res) => {
   }
 });
 
-// Country rankings
+/**
+ * @swagger
+ * /admin/stats/countries:
+ *   get:
+ *     summary: Country rankings
+ *     tags: [Statistics]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Ranked list of countries with user counts
+ */
 app.get('/admin/stats/countries', adminGuard, async (req, res) => {
   try {
     const { data: users, error } = await supabaseAdmin
@@ -962,7 +1225,25 @@ app.get('/admin/stats/countries', adminGuard, async (req, res) => {
   }
 });
 
-// User growth over time
+/**
+ * @swagger
+ * /admin/stats/growth:
+ *   get:
+ *     summary: User growth
+ *     tags: [Statistics]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: period
+ *         schema:
+ *           type: string
+ *           enum: [7d, 30d, 90d, 1y]
+ *           default: 30d
+ *     responses:
+ *       200:
+ *         description: Daily signup counts
+ */
 app.get('/admin/stats/growth', adminGuard, async (req, res) => {
   try {
     const { period = '30d' } = req.query;
@@ -1008,7 +1289,31 @@ app.get('/admin/stats/growth', adminGuard, async (req, res) => {
 
 // ===== AUDIT ENDPOINTS =====
 
-// Get admin actions
+/**
+ * @swagger
+ * /admin/audit/actions:
+ *   get:
+ *     summary: List admin actions
+ *     tags: [Audit]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 50 }
+ *       - in: query
+ *         name: admin_id
+ *         schema: { type: string, format: uuid }
+ *       - in: query
+ *         name: action
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Paginated admin actions
+ */
 app.get('/admin/audit/actions', adminGuard, async (req, res) => {
   try {
     const { page = 1, limit = 50, admin_id, action } = req.query;
@@ -1056,7 +1361,29 @@ app.get('/admin/audit/actions', adminGuard, async (req, res) => {
   }
 });
 
-// Get audit trail for specific user
+/**
+ * @swagger
+ * /admin/audit/user/{id}:
+ *   get:
+ *     summary: Audit trail for a user
+ *     tags: [Audit]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 50 }
+ *     responses:
+ *       200:
+ *         description: Paginated audit actions for target user
+ */
 app.get('/admin/audit/user/:id', adminGuard, async (req, res) => {
   try {
     const { id } = req.params;
