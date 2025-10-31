@@ -91,10 +91,42 @@ app.use(cors({ origin: CORS_ORIGINS.length ? CORS_ORIGINS : true }));
 app.set("trust proxy", 1);
 var limiter = rateLimit({ windowMs: 6e4, max: 120 });
 app.use(limiter);
+var waitlistLimiter = rateLimit({ windowMs: 6e4, max: 10 });
 app.get("/health", (_req, res) => {
   res.json({ ok: true, uptime: process.uptime() });
 });
 app.use("/docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+app.post("/waitlist", waitlistLimiter, async (req, res) => {
+  try {
+    const rawEmail = String(req.body?.email || "").trim().toLowerCase();
+    const rawPhone = String(req.body?.phoneNumber || "").trim();
+    const language = String(req.body?.language || "").trim();
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!rawEmail || !emailRegex.test(rawEmail)) {
+      return res.status(400).json({ error: "Valid email is required" });
+    }
+    if (!rawPhone) {
+      return res.status(400).json({ error: "Phone number is required" });
+    }
+    if (!language) {
+      return res.status(400).json({ error: "Language is required" });
+    }
+    const phoneNumber = rawPhone.replace(/[^+\d]/g, "");
+    const { error } = await supabaseAdmin.from("waitlist").insert({ email: rawEmail, phone_number: phoneNumber, language });
+    if (error) {
+      const already = error.message?.toLowerCase().includes("duplicate");
+      if (already) {
+        return res.json({ message: "Already on waitlist" });
+      }
+      logger.error({ err: error }, "Error inserting waitlist");
+      return res.status(500).json({ error: "Failed to add to waitlist" });
+    }
+    res.json({ message: "Added to waitlist" });
+  } catch (error) {
+    logger.error({ err: error }, "Unexpected error in /waitlist");
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
 function adminGuard(req, res, next) {
   try {
     const header = req.headers.authorization || "";
@@ -595,6 +627,50 @@ app.get("/admin/stats/growth", adminGuard, async (req, res) => {
     });
   } catch (error) {
     logger.error({ err: error }, "Unexpected error in /admin/stats/growth");
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+app.get("/admin/waitlist", adminGuard, async (req, res) => {
+  try {
+    const { page = 1, limit = 20, language, search } = req.query;
+    const offset = (Number(page) - 1) * Number(limit);
+    let query = supabaseAdmin.from("waitlist").select("id, email, phone_number, language, created_at", { count: "exact" }).order("created_at", { ascending: false });
+    if (language) query = query.eq("language", language);
+    if (search) query = query.or(`email.ilike.%${search}%,phone_number.ilike.%${search}%`);
+    const { data, error, count } = await query.range(offset, offset + Number(limit) - 1);
+    if (error) {
+      logger.error({ err: error }, "Error fetching waitlist");
+      return res.status(500).json({ error: "Failed to fetch waitlist" });
+    }
+    res.json({
+      entries: data || [],
+      pagination: {
+        page: Number(page),
+        limit: Number(limit),
+        total: count || 0,
+        pages: Math.ceil((count || 0) / Number(limit))
+      }
+    });
+  } catch (error) {
+    logger.error({ err: error }, "Unexpected error in /admin/waitlist");
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+app.get("/admin/waitlist/export", adminGuard, async (_req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin.from("waitlist").select("email, phone_number, language, created_at").order("created_at", { ascending: false });
+    if (error) {
+      logger.error({ err: error }, "Error exporting waitlist");
+      return res.status(500).json({ error: "Failed to export waitlist" });
+    }
+    const header = "email,phone_number,language,created_at\n";
+    const rows = (data || []).map((r) => [r.email, r.phone_number, r.language, r.created_at].join(","));
+    const csv = header + rows.join("\n");
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", 'attachment; filename="waitlist.csv"');
+    res.send(csv);
+  } catch (error) {
+    logger.error({ err: error }, "Unexpected error in /admin/waitlist/export");
     res.status(500).json({ error: "Internal server error" });
   }
 });
