@@ -31,6 +31,228 @@ export const supabaseAdmin = createClient(SUPABASE_URL || '', SUPABASE_SERVICE_R
   auth: { persistSession: false, autoRefreshToken: false },
 });
 
+// ===== REFERRAL CODE GENERATION UTILITY =====
+/**
+ * Generate a unique referral code that doesn't exist in either referral_codes or waitlist tables
+ * @param maxAttempts - Maximum number of attempts to generate a unique code (default: 10)
+ * @returns Promise<string> - Unique referral code
+ */
+const generateUniqueReferralCode = async (maxAttempts: number = 10): Promise<string> => {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // exclude easily confused chars (I, O, 0, 1)
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    // Generate a random 6-character code
+    let code = '';
+    for (let i = 0; i < 6; i++) {
+      code += alphabet[Math.floor(Math.random() * alphabet.length)];
+    }
+
+    // Check if code exists in referral_codes table
+    const { data: existingReferralCode, error: referralError } = await supabaseAdmin
+      .from('referral_codes')
+      .select('code')
+      .eq('code', code)
+      .maybeSingle();
+
+    if (referralError && referralError.code !== 'PGRST116') {
+      logger.warn({ err: referralError, attempt }, 'Error checking referral_codes for duplicate');
+      continue;
+    }
+
+    if (existingReferralCode) {
+      logger.debug({ code, attempt }, 'Code exists in referral_codes, retrying');
+      continue;
+    }
+
+    // Check if code exists in waitlist table
+    const { data: existingWaitlistCode, error: waitlistError } = await supabaseAdmin
+      .from('waitlist')
+      .select('referral_code')
+      .eq('referral_code', code)
+      .maybeSingle();
+
+    if (waitlistError && waitlistError.code !== 'PGRST116') {
+      logger.warn({ err: waitlistError, attempt }, 'Error checking waitlist for duplicate');
+      continue;
+    }
+
+    if (existingWaitlistCode) {
+      logger.debug({ code, attempt }, 'Code exists in waitlist, retrying');
+      continue;
+    }
+
+    // Code is unique in both tables
+    logger.info({ code, attempt: attempt + 1 }, 'Generated unique referral code');
+    return code;
+  }
+
+  // If we exhausted all attempts, throw an error
+  throw new Error(`Failed to generate unique referral code after ${maxAttempts} attempts`);
+};
+
+/**
+ * Validate if a referral code exists in either referral_codes or waitlist tables
+ * @param code - Referral code to validate
+ * @returns Promise<{ exists: boolean; ownerType: 'user' | 'waitlist' | null; ownerId?: string }>
+ */
+const validateReferralCode = async (code: string): Promise<{
+  exists: boolean;
+  ownerType: 'user' | 'waitlist' | null;
+  ownerId?: string;
+  ownerEmail?: string;
+}> => {
+  const normalizedCode = code.trim().toUpperCase();
+
+  if (!normalizedCode) {
+    return { exists: false, ownerType: null };
+  }
+
+  // Check in referral_codes table (for users who signed up)
+  const { data: referralCode, error: referralError } = await supabaseAdmin
+    .from('referral_codes')
+    .select('id, owner_user_id, code')
+    .ilike('code', normalizedCode)
+    .maybeSingle();
+
+  if (referralError && referralError.code !== 'PGRST116') {
+    logger.warn({ err: referralError }, 'Error validating referral code in referral_codes');
+  }
+
+  if (referralCode) {
+    return {
+      exists: true,
+      ownerType: 'user',
+      ownerId: referralCode.owner_user_id
+    };
+  }
+
+  // Check in waitlist table (for waitlist entries)
+  const { data: waitlistEntry, error: waitlistError } = await supabaseAdmin
+    .from('waitlist')
+    .select('id, email, referral_code')
+    .ilike('referral_code', normalizedCode)
+    .maybeSingle();
+
+  if (waitlistError && waitlistError.code !== 'PGRST116') {
+    logger.warn({ err: waitlistError }, 'Error validating referral code in waitlist');
+  }
+
+  if (waitlistEntry) {
+    return {
+      exists: true,
+      ownerType: 'waitlist',
+      ownerId: waitlistEntry.id,
+      ownerEmail: waitlistEntry.email
+    };
+  }
+
+  return { exists: false, ownerType: null };
+};
+
+// ===== EMAIL SENDING UTILITY =====
+/**
+ * Send referral emails via Supabase Edge Function
+ * @param type - Type of email: 'referrer' or 'referred'
+ * @param recipientEmail - Email address to send to
+ * @param referralCode - The referral code used
+ * @param referredEmail - Email of the person who was referred (for referrer emails)
+ * @returns Promise<boolean> - Returns true if email was sent successfully
+ */
+const sendReferralEmail = async (
+  type: 'referrer' | 'referred',
+  recipientEmail: string,
+  referralCode: string,
+  referredEmail?: string
+): Promise<boolean> => {
+  try {
+    if (!SUPABASE_URL) {
+      logger.warn('SUPABASE_URL not set, cannot send email');
+      return false;
+    }
+
+    const edgeFunctionUrl = `${SUPABASE_URL}/functions/v1/send-referral-emails`;
+    const payload: any = {
+      type,
+      recipientEmail,
+      referralCode,
+    };
+
+    if (type === 'referrer' && referredEmail) {
+      payload.referredEmail = referredEmail;
+    }
+
+    const response = await fetch(edgeFunctionUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      logger.error(
+        {
+          type,
+          recipientEmail,
+          status: response.status,
+          error: errorText
+        },
+        'Failed to send referral email via Edge Function'
+      );
+      return false;
+    }
+
+    const result = await response.json();
+    logger.info(
+      { type, recipientEmail, messageId: result.messageId },
+      'Referral email sent successfully'
+    );
+    return true;
+  } catch (error) {
+    logger.error(
+      { err: error, type, recipientEmail },
+      'Error sending referral email'
+    );
+    return false;
+  }
+};
+
+/**
+ * Get referrer's email address from validation result
+ * @param validation - Validation result from validateReferralCode
+ * @returns Promise<string | null> - Referrer's email address or null if not found
+ */
+const getReferrerEmail = async (validation: {
+  exists: boolean;
+  ownerType: 'user' | 'waitlist' | null;
+  ownerId?: string;
+  ownerEmail?: string;
+}): Promise<string | null> => {
+  if (!validation.exists || !validation.ownerId) {
+    return null;
+  }
+
+  // If ownerType is waitlist, we already have the email
+  if (validation.ownerType === 'waitlist' && validation.ownerEmail) {
+    return validation.ownerEmail;
+  }
+
+  // If ownerType is user, fetch email from profiles table
+  if (validation.ownerType === 'user' && validation.ownerId) {
+    const { data: profile } = await supabaseAdmin
+      .from('profiles')
+      .select('email')
+      .eq('id', validation.ownerId)
+      .maybeSingle();
+
+    return profile?.email || null;
+  }
+
+  return null;
+};
+
 // Swagger setup
 const swaggerSpec = swaggerJSDoc({
   definition: {
@@ -135,6 +357,122 @@ app.get('/health', (_req, res) => {
 // Swagger UI (protect in prod if desired)
 app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
+// ===== ADMIN LOGIN ENDPOINT =====
+/**
+ * @swagger
+ * /admin/login:
+ *   post:
+ *     summary: Admin login
+ *     description: Authenticate admin user and get JWT token
+ *     tags: [System]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email, password]
+ *             properties:
+ *               email:
+ *                 type: string
+ *                 format: email
+ *               password:
+ *                 type: string
+ *                 format: password
+ *     responses:
+ *       200:
+ *         description: Login successful
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 token:
+ *                   type: string
+ *                 user:
+ *                   type: object
+ *                   properties:
+ *                     id:
+ *                       type: string
+ *                     email:
+ *                       type: string
+ *                     admin_roles:
+ *                       type: array
+ *                       items:
+ *                         type: string
+ *       401:
+ *         description: Invalid credentials or not an admin
+ *       500:
+ *         description: Internal server error
+ */
+app.post('/admin/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required' });
+    }
+
+    // Authenticate with Supabase Auth
+    const { data: authData, error: authError } = await supabaseAdmin.auth.signInWithPassword({
+      email: email.trim().toLowerCase(),
+      password,
+    });
+
+    if (authError || !authData.user) {
+      logger.warn({ email: email.trim().toLowerCase() }, 'Failed login attempt');
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    const userId = authData.user.id;
+
+    // Check if user has admin roles in profiles table
+    const { data: profile, error: profileError } = await supabaseAdmin
+      .from('profiles')
+      .select('id, email, admin_roles')
+      .eq('id', userId)
+      .single();
+
+    if (profileError || !profile) {
+      logger.error({ err: profileError, userId }, 'Error fetching user profile');
+      return res.status(500).json({ error: 'Failed to fetch user profile' });
+    }
+
+    const adminRoles = profile.admin_roles || [];
+    if (adminRoles.length === 0) {
+      return res.status(403).json({ error: 'User does not have admin privileges' });
+    }
+
+    // Determine highest role (superadmin > admin)
+    const role = adminRoles.includes('superadmin') ? 'superadmin' : 'admin';
+
+    // Generate JWT token
+    const token = jwt.sign(
+      {
+        sub: userId,
+        email: profile.email,
+        role,
+      },
+      ADMIN_JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    logger.info({ userId, role }, 'Admin login successful');
+
+    res.json({
+      token,
+      user: {
+        id: profile.id,
+        email: profile.email,
+        admin_roles: adminRoles,
+      },
+    });
+  } catch (error) {
+    logger.error({ err: error }, 'Unexpected error in /admin/login');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // ===== PUBLIC WAITLIST ENDPOINT =====
 /**
  * @swagger
@@ -157,9 +495,22 @@ app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
  *                 type: string
  *               language:
  *                 type: string
+ *               usedReferralCode:
+ *                 type: string
+ *                 description: Optional referral code used when joining waitlist
  *     responses:
  *       200:
  *         description: Added to waitlist
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *                 referralCode:
+ *                   type: string
+ *                   description: Unique referral code assigned to this waitlist entry
  *       400:
  *         description: Validation error
  */
@@ -168,6 +519,7 @@ app.post('/waitlist', waitlistLimiter, async (req, res) => {
     const rawEmail = String((req.body?.email || '')).trim().toLowerCase();
     const rawPhone = String((req.body?.phoneNumber || '')).trim();
     const language = String((req.body?.language || '')).trim();
+    const usedReferralCodeRaw = req.body?.usedReferralCode ? String(req.body.usedReferralCode).trim().toUpperCase() : null;
 
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!rawEmail || !emailRegex.test(rawEmail)) {
@@ -183,21 +535,151 @@ app.post('/waitlist', waitlistLimiter, async (req, res) => {
     // Basic E.164 normalization attempt (keep + and digits)
     const phoneNumber = rawPhone.replace(/[^+\d]/g, '');
 
-    const { error } = await supabaseAdmin
+    // Validate used_referral_code if provided
+    let validatedReferralCode: string | null = null;
+    let referralValidation: { exists: boolean; ownerType: 'user' | 'waitlist' | null; ownerId?: string; ownerEmail?: string } | null = null;
+
+    if (usedReferralCodeRaw && usedReferralCodeRaw.length > 0) {
+      referralValidation = await validateReferralCode(usedReferralCodeRaw);
+      if (!referralValidation.exists) {
+        logger.warn({ code: usedReferralCodeRaw, email: rawEmail }, 'Invalid referral code provided');
+        return res.status(400).json({ error: 'Invalid referral code' });
+      }
+
+      // Don't allow self-referral
+      // Check if it's a waitlist entry with the same email
+      if (referralValidation.ownerType === 'waitlist' && referralValidation.ownerEmail === rawEmail) {
+        logger.warn({ code: usedReferralCodeRaw, email: rawEmail }, 'Self-referral attempted (waitlist)');
+        return res.status(400).json({ error: 'Cannot use your own referral code' });
+      }
+
+      // Check if it's a user referral code - verify email doesn't match
+      if (referralValidation.ownerType === 'user' && referralValidation.ownerId) {
+        const { data: userProfile } = await supabaseAdmin
+          .from('profiles')
+          .select('email')
+          .eq('id', referralValidation.ownerId)
+          .maybeSingle();
+
+        if (userProfile?.email === rawEmail) {
+          logger.warn({ code: usedReferralCodeRaw, email: rawEmail }, 'Self-referral attempted (user)');
+          return res.status(400).json({ error: 'Cannot use your own referral code' });
+        }
+      }
+
+      validatedReferralCode = usedReferralCodeRaw;
+    }
+
+    // Generate unique referral code for this waitlist entry
+    let referralCode: string;
+    try {
+      referralCode = await generateUniqueReferralCode();
+    } catch (error: any) {
+      logger.error({ err: error, email: rawEmail }, 'Failed to generate unique referral code');
+      return res.status(500).json({ error: 'Failed to generate referral code. Please try again.' });
+    }
+
+    // Insert into waitlist with referral codes
+    const { data: waitlistEntry, error } = await supabaseAdmin
       .from('waitlist')
-      .insert({ email: rawEmail, phone_number: phoneNumber, language });
+      .insert({
+        email: rawEmail,
+        phone_number: phoneNumber,
+        language,
+        referral_code: referralCode,
+        used_referral_code: validatedReferralCode
+      })
+      .select('id, referral_code')
+      .single();
 
     if (error) {
       // Unique violation => already on waitlist is OK UX-wise
-      const already = error.message?.toLowerCase().includes('duplicate');
+      const already = error.message?.toLowerCase().includes('duplicate') ||
+                     error.code === '23505'; // PostgreSQL unique violation
       if (already) {
-        return res.json({ message: 'Already on waitlist' });
+        // If already exists, check if they have a referral code
+        const { data: existing } = await supabaseAdmin
+          .from('waitlist')
+          .select('referral_code, used_referral_code')
+          .eq('email', rawEmail)
+          .maybeSingle();
+
+        // If they don't have a referral code, generate one for them
+        if (existing && !existing.referral_code) {
+          try {
+            const newReferralCode = await generateUniqueReferralCode();
+            const { error: updateError } = await supabaseAdmin
+              .from('waitlist')
+              .update({ referral_code: newReferralCode })
+              .eq('email', rawEmail);
+
+            if (!updateError) {
+              logger.info({ email: rawEmail, referralCode: newReferralCode }, 'Generated referral code for existing waitlist entry');
+              return res.json({
+                message: 'Already on waitlist',
+                referralCode: newReferralCode
+              });
+            }
+          } catch (genError) {
+            logger.error({ err: genError, email: rawEmail }, 'Failed to generate referral code for existing entry');
+          }
+        }
+
+        return res.json({
+          message: 'Already on waitlist',
+          referralCode: existing?.referral_code || null
+        });
       }
-      logger.error({ err: error }, 'Error inserting waitlist');
+      logger.error({ err: error, email: rawEmail }, 'Error inserting waitlist');
       return res.status(500).json({ error: 'Failed to add to waitlist' });
     }
 
-    res.json({ message: 'Added to waitlist' });
+    logger.info({
+      email: rawEmail,
+      referralCode,
+      usedReferralCode: validatedReferralCode
+    }, 'Waitlist entry created with referral codes');
+
+    // Send referral emails asynchronously (don't block the response)
+    if (validatedReferralCode && referralValidation) {
+      // Get referrer's email from validation result (already validated earlier)
+      const referrerEmail = await getReferrerEmail(referralValidation);
+
+      if (referrerEmail) {
+        // Send email to referrer (person who referred someone)
+        sendReferralEmail('referrer', referrerEmail, validatedReferralCode, rawEmail)
+          .catch(err => {
+            logger.error({ err, referrerEmail }, 'Failed to send referrer email (async)');
+          });
+
+        // Send email to referred person
+        sendReferralEmail('referred', rawEmail, referralCode)
+          .catch(err => {
+            logger.error({ err, referredEmail: rawEmail }, 'Failed to send referred email (async)');
+          });
+      } else {
+        logger.warn(
+          { referralCode: validatedReferralCode, email: rawEmail },
+          'Could not find referrer email for referral notification'
+        );
+        // Still send email to referred person even if referrer email not found
+        sendReferralEmail('referred', rawEmail, referralCode)
+          .catch(err => {
+            logger.error({ err, referredEmail: rawEmail }, 'Failed to send referred email (async)');
+          });
+      }
+    } else {
+      // No referral code used, but still send welcome email to the new waitlist entry
+      sendReferralEmail('referred', rawEmail, referralCode)
+        .catch(err => {
+          logger.error({ err, referredEmail: rawEmail }, 'Failed to send referred email (async)');
+        });
+    }
+
+    res.json({
+      message: 'Added to waitlist',
+      referralCode: referralCode
+    });
   } catch (error) {
     logger.error({ err: error }, 'Unexpected error in /waitlist');
     res.status(500).json({ error: 'Internal server error' });
@@ -1393,7 +1875,7 @@ app.get('/admin/waitlist', adminGuard, async (req, res) => {
 
     let query = supabaseAdmin
       .from('waitlist')
-      .select('id, email, phone_number, language, created_at', { count: 'exact' })
+      .select('id, email, phone_number, language, referral_code, used_referral_code, created_at', { count: 'exact' })
       .order('created_at', { ascending: false });
 
     if (language) query = query.eq('language', language);
@@ -1440,7 +1922,7 @@ app.get('/admin/waitlist/export', adminGuard, async (_req, res) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('waitlist')
-      .select('email, phone_number, language, created_at')
+      .select('email, phone_number, language, referral_code, used_referral_code, created_at')
       .order('created_at', { ascending: false });
 
     if (error) {
@@ -1448,8 +1930,15 @@ app.get('/admin/waitlist/export', adminGuard, async (_req, res) => {
       return res.status(500).json({ error: 'Failed to export waitlist' });
     }
 
-    const header = 'email,phone_number,language,created_at\n';
-    const rows = (data || []).map(r => [r.email, r.phone_number, r.language, r.created_at].join(','));
+    const header = 'email,phone_number,language,referral_code,used_referral_code,created_at\n';
+    const rows = (data || []).map(r => [
+      r.email,
+      r.phone_number,
+      r.language,
+      r.referral_code || '',
+      r.used_referral_code || '',
+      r.created_at
+    ].join(','));
     const csv = header + rows.join('\n');
 
     res.setHeader('Content-Type', 'text/csv');
