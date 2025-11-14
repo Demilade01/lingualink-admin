@@ -149,6 +149,110 @@ const validateReferralCode = async (code: string): Promise<{
   return { exists: false, ownerType: null };
 };
 
+// ===== EMAIL SENDING UTILITY =====
+/**
+ * Send referral emails via Supabase Edge Function
+ * @param type - Type of email: 'referrer' or 'referred'
+ * @param recipientEmail - Email address to send to
+ * @param referralCode - The referral code used
+ * @param referredEmail - Email of the person who was referred (for referrer emails)
+ * @returns Promise<boolean> - Returns true if email was sent successfully
+ */
+const sendReferralEmail = async (
+  type: 'referrer' | 'referred',
+  recipientEmail: string,
+  referralCode: string,
+  referredEmail?: string
+): Promise<boolean> => {
+  try {
+    if (!SUPABASE_URL) {
+      logger.warn('SUPABASE_URL not set, cannot send email');
+      return false;
+    }
+
+    const edgeFunctionUrl = `${SUPABASE_URL}/functions/v1/send-referral-emails`;
+    const payload: any = {
+      type,
+      recipientEmail,
+      referralCode,
+    };
+
+    if (type === 'referrer' && referredEmail) {
+      payload.referredEmail = referredEmail;
+    }
+
+    const response = await fetch(edgeFunctionUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      logger.error(
+        {
+          type,
+          recipientEmail,
+          status: response.status,
+          error: errorText
+        },
+        'Failed to send referral email via Edge Function'
+      );
+      return false;
+    }
+
+    const result = await response.json();
+    logger.info(
+      { type, recipientEmail, messageId: result.messageId },
+      'Referral email sent successfully'
+    );
+    return true;
+  } catch (error) {
+    logger.error(
+      { err: error, type, recipientEmail },
+      'Error sending referral email'
+    );
+    return false;
+  }
+};
+
+/**
+ * Get referrer's email address from validation result
+ * @param validation - Validation result from validateReferralCode
+ * @returns Promise<string | null> - Referrer's email address or null if not found
+ */
+const getReferrerEmail = async (validation: {
+  exists: boolean;
+  ownerType: 'user' | 'waitlist' | null;
+  ownerId?: string;
+  ownerEmail?: string;
+}): Promise<string | null> => {
+  if (!validation.exists || !validation.ownerId) {
+    return null;
+  }
+
+  // If ownerType is waitlist, we already have the email
+  if (validation.ownerType === 'waitlist' && validation.ownerEmail) {
+    return validation.ownerEmail;
+  }
+
+  // If ownerType is user, fetch email from profiles table
+  if (validation.ownerType === 'user' && validation.ownerId) {
+    const { data: profile } = await supabaseAdmin
+      .from('profiles')
+      .select('email')
+      .eq('id', validation.ownerId)
+      .maybeSingle();
+
+    return profile?.email || null;
+  }
+
+  return null;
+};
+
 // Swagger setup
 const swaggerSpec = swaggerJSDoc({
   definition: {
@@ -433,26 +537,28 @@ app.post('/waitlist', waitlistLimiter, async (req, res) => {
 
     // Validate used_referral_code if provided
     let validatedReferralCode: string | null = null;
+    let referralValidation: { exists: boolean; ownerType: 'user' | 'waitlist' | null; ownerId?: string; ownerEmail?: string } | null = null;
+
     if (usedReferralCodeRaw && usedReferralCodeRaw.length > 0) {
-      const validation = await validateReferralCode(usedReferralCodeRaw);
-      if (!validation.exists) {
+      referralValidation = await validateReferralCode(usedReferralCodeRaw);
+      if (!referralValidation.exists) {
         logger.warn({ code: usedReferralCodeRaw, email: rawEmail }, 'Invalid referral code provided');
         return res.status(400).json({ error: 'Invalid referral code' });
       }
 
       // Don't allow self-referral
       // Check if it's a waitlist entry with the same email
-      if (validation.ownerType === 'waitlist' && validation.ownerEmail === rawEmail) {
+      if (referralValidation.ownerType === 'waitlist' && referralValidation.ownerEmail === rawEmail) {
         logger.warn({ code: usedReferralCodeRaw, email: rawEmail }, 'Self-referral attempted (waitlist)');
         return res.status(400).json({ error: 'Cannot use your own referral code' });
       }
 
       // Check if it's a user referral code - verify email doesn't match
-      if (validation.ownerType === 'user' && validation.ownerId) {
+      if (referralValidation.ownerType === 'user' && referralValidation.ownerId) {
         const { data: userProfile } = await supabaseAdmin
           .from('profiles')
           .select('email')
-          .eq('id', validation.ownerId)
+          .eq('id', referralValidation.ownerId)
           .maybeSingle();
 
         if (userProfile?.email === rawEmail) {
@@ -533,6 +639,42 @@ app.post('/waitlist', waitlistLimiter, async (req, res) => {
       referralCode,
       usedReferralCode: validatedReferralCode
     }, 'Waitlist entry created with referral codes');
+
+    // Send referral emails asynchronously (don't block the response)
+    if (validatedReferralCode && referralValidation) {
+      // Get referrer's email from validation result (already validated earlier)
+      const referrerEmail = await getReferrerEmail(referralValidation);
+
+      if (referrerEmail) {
+        // Send email to referrer (person who referred someone)
+        sendReferralEmail('referrer', referrerEmail, validatedReferralCode, rawEmail)
+          .catch(err => {
+            logger.error({ err, referrerEmail }, 'Failed to send referrer email (async)');
+          });
+
+        // Send email to referred person
+        sendReferralEmail('referred', rawEmail, referralCode)
+          .catch(err => {
+            logger.error({ err, referredEmail: rawEmail }, 'Failed to send referred email (async)');
+          });
+      } else {
+        logger.warn(
+          { referralCode: validatedReferralCode, email: rawEmail },
+          'Could not find referrer email for referral notification'
+        );
+        // Still send email to referred person even if referrer email not found
+        sendReferralEmail('referred', rawEmail, referralCode)
+          .catch(err => {
+            logger.error({ err, referredEmail: rawEmail }, 'Failed to send referred email (async)');
+          });
+      }
+    } else {
+      // No referral code used, but still send welcome email to the new waitlist entry
+      sendReferralEmail('referred', rawEmail, referralCode)
+        .catch(err => {
+          logger.error({ err, referredEmail: rawEmail }, 'Failed to send referred email (async)');
+        });
+    }
 
     res.json({
       message: 'Added to waitlist',
